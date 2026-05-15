@@ -11,11 +11,13 @@ import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, cast
+from typing import Any, Callable, Iterator, cast
 
 import pandas as pd
 
 from src.lib import analyze_pipeline, infer_pipeline
+
+ProgressCallback = Callable[[str], None]
 
 
 @dataclass(slots=True, frozen=True)
@@ -259,6 +261,7 @@ def extract_elements(
     model_index: pd.DataFrame,
     *,
     dotnet_command: str = "dotnet",
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if model_index.empty:
         return pd.DataFrame(), model_index.copy()
@@ -267,7 +270,10 @@ def extract_elements(
         repo_root / path for path in cast(list[str], model_index["final_cs_path"].tolist())
     ]
     extraction_by_path: dict[str, dict[str, Any]] = {}
-    for final_path in final_paths:
+    total_paths = len(final_paths)
+    for index, final_path in enumerate(final_paths, start=1):
+        if progress_callback is not None:
+            progress_callback(f"extract {index}/{total_paths}: {final_path.name}")
         extraction_rows = run_csharp_model_extractor(
             repo_root,
             [final_path],
@@ -540,6 +546,8 @@ def write_prepare_outputs(
     repo_root: Path,
     model_index: pd.DataFrame,
     elements: pd.DataFrame,
+    *,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     paths = prepare_paths(repo_root)
     paths.extracted_dir.mkdir(parents=True, exist_ok=True)
@@ -548,7 +556,11 @@ def write_prepare_outputs(
     model_index.to_csv(paths.model_index_csv, index=False)
     elements.to_csv(paths.elements_csv, index=False)
 
-    for model_id in cast(list[str], model_index["model_id"].tolist()):
+    model_ids = cast(list[str], model_index["model_id"].tolist())
+    total_models = len(model_ids)
+    for index, model_id in enumerate(model_ids, start=1):
+        if progress_callback is not None:
+            progress_callback(f"project {index}/{total_models}: {model_id}")
         build_property_projection_for_model(
             elements,
             model_id,
@@ -612,14 +624,29 @@ def prepare_alignment_artifacts(
     repo_root: Path,
     *,
     dotnet_command: str = "dotnet",
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[dict[str, Any], pd.DataFrame, pd.DataFrame]:
+    if progress_callback is not None:
+        progress_callback("building model index")
     model_index = build_model_index(repo_root)
+    if progress_callback is not None:
+        progress_callback(f"model index ready: {len(model_index)} models")
     elements, model_index_with_parse = extract_elements(
         repo_root,
         model_index,
         dotnet_command=dotnet_command,
+        progress_callback=progress_callback,
     )
-    summary = write_prepare_outputs(repo_root, model_index_with_parse, elements)
+    if progress_callback is not None:
+        progress_callback(f"elements ready: {len(elements)} rows")
+    summary = write_prepare_outputs(
+        repo_root,
+        model_index_with_parse,
+        elements,
+        progress_callback=progress_callback,
+    )
+    if progress_callback is not None:
+        progress_callback("project artifacts ready")
     return summary, model_index_with_parse, elements
 
 
@@ -627,8 +654,13 @@ def prepare_project_artifacts(
     repo_root: Path,
     *,
     dotnet_command: str = "dotnet",
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[dict[str, Any], pd.DataFrame, pd.DataFrame]:
-    return prepare_alignment_artifacts(repo_root, dotnet_command=dotnet_command)
+    return prepare_alignment_artifacts(
+        repo_root,
+        dotnet_command=dotnet_command,
+        progress_callback=progress_callback,
+    )
 
 
 def load_projection_csv(repo_root: Path, layer: str, mode: str, model_id: str) -> pd.DataFrame:
