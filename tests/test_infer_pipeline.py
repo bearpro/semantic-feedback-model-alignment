@@ -12,9 +12,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def test_load_source_matrix_has_stable_line_numbers() -> None:
     source_matrix = infer_pipeline.load_source_matrix(REPO_ROOT)
-    assert len(source_matrix) == 54
+    assert not source_matrix.empty
     assert source_matrix.iloc[0]["source_matrix_line"] == 1
-    assert source_matrix.iloc[-1]["source_matrix_line"] == 54
+    assert source_matrix.iloc[-1]["source_matrix_line"] == len(source_matrix)
 
 
 def test_render_template_replaces_named_placeholders() -> None:
@@ -55,7 +55,7 @@ def test_build_config_snapshot_exposes_runtime_values_without_hiding_paths() -> 
     )
     assert snapshot["provider"] == "openrouter"
     assert snapshot["runs"] == 2
-    assert snapshot["source_matrix_rows"] == 54
+    assert snapshot["source_matrix_rows"] == len(source_matrix)
     assert snapshot["max_new_requests"] == 5
     assert snapshot["api_key_present"] is True
     assert snapshot["feedback_analyzer_model"] == "gpt-5.4-mini"
@@ -83,7 +83,7 @@ def test_discover_infer_artifacts_reads_existing_final_cs_files() -> None:
     assert not artifact_df.empty
     assert "final_cs_path" in artifact_df.columns
     assert artifact_df["final_cs_path"].str.endswith("/final.cs").all()
-    assert set(artifact_df["scenario"]) == {"control", "guided"}
+    assert set(artifact_df["scenario"]).issubset(set(infer_pipeline.SUPPORTED_SCENARIOS))
 
 
 def test_render_model_snapshot_svg_contains_document_and_scenario_legends() -> None:

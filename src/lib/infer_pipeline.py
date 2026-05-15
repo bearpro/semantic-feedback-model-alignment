@@ -16,6 +16,8 @@ from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
 SUPPORTED_SCENARIOS = ("control", "guided", "feedback")
+ARTIFACTS_ROOT_ENV_VAR = "EXPERIMENT_ARTIFACTS_ROOT"
+CONFIG_PATH_ENV_VAR = "EXPERIMENT_CONFIG_PATH"
 FEEDBACK_ANALYZER_MODEL = "gpt-5.4-mini"
 FEEDBACK_ANALYZER_PROVIDER = "openai"
 FEEDBACK_ANALYZER_API_KEY_ENV_VAR = "OPENAI_API_KEY"
@@ -82,6 +84,24 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def artifacts_root(repo_root: Path) -> Path:
+    raw_path = os.getenv(ARTIFACTS_ROOT_ENV_VAR)
+    if not raw_path:
+        return repo_root / "artifacts"
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = repo_root / path
+    return path
+
+
+def relative_to_repo(repo_root: Path, path: Path) -> str:
+    resolved_path = path.resolve()
+    try:
+        return resolved_path.relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        return resolved_path.as_posix()
+
+
 def write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -125,9 +145,20 @@ def dataframe_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
     return cast(list[dict[str, Any]], json.loads(serialized_rows))
 
 
-def load_runtime_config(repo_root: Path) -> RuntimeConfig:
+def load_runtime_config(
+    repo_root: Path,
+    config_path: Path | None = None,
+) -> RuntimeConfig:
     env_path = repo_root / ".env"
-    config_path = repo_root / "config" / "default.yml"
+    if config_path is None:
+        raw_config_path = os.getenv(CONFIG_PATH_ENV_VAR)
+        config_path = (
+            Path(raw_config_path)
+            if raw_config_path
+            else repo_root / "config" / "default.yml"
+        )
+    if not config_path.is_absolute():
+        config_path = repo_root / config_path
     load_dotenv(env_path)
 
     config = yaml.safe_load(read_text(config_path)) or {}
@@ -165,11 +196,12 @@ def build_config_snapshot(
     source_matrix: pd.DataFrame,
     max_new_requests: int | None,
 ) -> dict[str, Any]:
+    source_matrix_path = artifacts_root(repo_root) / "sources" / "source-matrix.json"
     return {
         "started_at": datetime.now(UTC).isoformat(),
         "repo_root": repo_root.as_posix(),
-        "config_path": runtime_config.config_path.relative_to(repo_root).as_posix(),
-        "env_path": runtime_config.env_path.relative_to(repo_root).as_posix(),
+        "config_path": relative_to_repo(repo_root, runtime_config.config_path),
+        "env_path": relative_to_repo(repo_root, runtime_config.env_path),
         "provider": runtime_config.provider,
         "runs": runtime_config.runs,
         "temperature": runtime_config.temperature,
@@ -181,7 +213,7 @@ def build_config_snapshot(
         "feedback_analyzer_api_key_present": bool(runtime_config.feedback_analyzer_api_key),
         "feedback_analyzer_temperature": runtime_config.feedback_analyzer_temperature,
         "feedback_analyzer_max_tokens": runtime_config.feedback_analyzer_max_tokens,
-        "source_matrix_path": "artifacts/sources/source-matrix.json",
+        "source_matrix_path": relative_to_repo(repo_root, source_matrix_path),
         "source_matrix_rows": len(source_matrix),
         "max_new_requests": max_new_requests,
         "supported_scenarios": list(SUPPORTED_SCENARIOS),
@@ -209,7 +241,7 @@ def load_feedback_prompt_bundle(repo_root: Path) -> FeedbackPromptBundle:
 
 
 def load_source_matrix(repo_root: Path) -> pd.DataFrame:
-    matrix_path = repo_root / "artifacts" / "sources" / "source-matrix.json"
+    matrix_path = artifacts_root(repo_root) / "sources" / "source-matrix.json"
     if not matrix_path.exists():
         raise FileNotFoundError(f"Source matrix not found: {matrix_path}")
 
@@ -399,8 +431,7 @@ def run_inference_request(
 def build_run_paths(repo_root: Path, row: dict[str, Any], run_number: int) -> RunPaths:
     model_slug = slugify(row["model"])
     run_dir = (
-        repo_root
-        / "artifacts"
+        artifacts_root(repo_root)
         / "infer"
         / row["document_stem"]
         / row["scenario"]
@@ -885,7 +916,7 @@ def process_feedback_run(
 
 
 def rebuild_index(repo_root: Path) -> pd.DataFrame:
-    infer_root = repo_root / "artifacts" / "infer"
+    infer_root = artifacts_root(repo_root) / "infer"
     record_paths = sorted(infer_root.rglob("record.json"))
     records = [json.loads(read_text(path)) for path in record_paths]
     index_path = infer_root / "infer-results.json"

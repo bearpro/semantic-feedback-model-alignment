@@ -169,6 +169,108 @@ def test_build_positive_pairs_excludes_same_scenario_replicas_but_keeps_cross_sc
     assert "doc__guided__m1__run1__TO__doc__control__m2__run1" in pair_ids
 
 
+def test_build_positive_pairs_can_keep_only_same_scenario_pairs_across_runs() -> None:
+    model_index = pd.DataFrame(
+        [
+            {
+                "model_id": "doc__control__m1__run1",
+                "source_document_id": "doc",
+                "condition": "control",
+                "producer_id": "m1",
+                "run": 1,
+            },
+            {
+                "model_id": "doc__control__m1__run2",
+                "source_document_id": "doc",
+                "condition": "control",
+                "producer_id": "m1",
+                "run": 2,
+            },
+            {
+                "model_id": "doc__control__m2__run1",
+                "source_document_id": "doc",
+                "condition": "control",
+                "producer_id": "m2",
+                "run": 1,
+            },
+            {
+                "model_id": "doc__guided__m1__run1",
+                "source_document_id": "doc",
+                "condition": "guided",
+                "producer_id": "m1",
+                "run": 1,
+            },
+            {
+                "model_id": "doc__guided__m2__run1",
+                "source_document_id": "doc",
+                "condition": "guided",
+                "producer_id": "m2",
+                "run": 1,
+            },
+        ]
+    )
+
+    pairs = align_pipeline.build_positive_pairs(
+        model_index,
+        same_condition_only=True,
+    )
+    pair_ids = set(pairs["pair_id"].tolist())
+
+    assert (pairs["source_condition"] == pairs["target_condition"]).all()
+    assert "doc__control__m1__run1__TO__doc__guided__m2__run1" not in pair_ids
+    assert "doc__control__m1__run2__TO__doc__control__m2__run1" in pair_ids
+    assert "doc__guided__m1__run1__TO__doc__guided__m2__run1" in pair_ids
+
+
+def test_build_positive_pairs_can_keep_only_matching_run_indices() -> None:
+    model_index = pd.DataFrame(
+        [
+            {
+                "model_id": "doc__control__m1__run1",
+                "source_document_id": "doc",
+                "condition": "control",
+                "producer_id": "m1",
+                "run": 1,
+            },
+            {
+                "model_id": "doc__control__m1__run2",
+                "source_document_id": "doc",
+                "condition": "control",
+                "producer_id": "m1",
+                "run": 2,
+            },
+            {
+                "model_id": "doc__control__m2__run1",
+                "source_document_id": "doc",
+                "condition": "control",
+                "producer_id": "m2",
+                "run": 1,
+            },
+            {
+                "model_id": "doc__control__m2__run2",
+                "source_document_id": "doc",
+                "condition": "control",
+                "producer_id": "m2",
+                "run": 2,
+            },
+        ]
+    )
+
+    pairs = align_pipeline.build_positive_pairs(
+        model_index,
+        same_condition_only=True,
+        same_run_index_only=True,
+    )
+    pair_ids = set(pairs["pair_id"].tolist())
+
+    assert "doc__control__m1__run1__TO__doc__control__m2__run1" in pair_ids
+    assert "doc__control__m1__run1__TO__doc__control__m2__run2" not in pair_ids
+    assert set(zip(pairs["source_run"], pairs["target_run"], strict=True)) == {
+        (1, 1),
+        (2, 2),
+    }
+
+
 def test_build_alignment_tasks_expands_pairs_projection_and_methods(tmp_path: Path) -> None:
     repo_root = tmp_path
     projections_dir = align_pipeline.prepare_paths(repo_root).projections_dir
@@ -214,6 +316,51 @@ def test_build_alignment_tasks_expands_pairs_projection_and_methods(tmp_path: Pa
     assert len(tasks) == len(projection_specs) * expected_methods
     assert tasks["task_id"].is_unique
     assert set(tasks["backend"]) == {"valentine", "bdikit", "magneto"}
+
+
+def test_build_alignment_tasks_can_use_semantic_method_subset(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    projections_dir = align_pipeline.prepare_paths(repo_root).projections_dir
+    projection_specs = align_pipeline.semantic_projection_specs()
+    for layer, mode in projection_specs:
+        projection_dir = projections_dir / layer / mode
+        projection_dir.mkdir(parents=True, exist_ok=True)
+        for model_id in ("m1", "m2"):
+            (projection_dir / f"{model_id}.csv").write_text(
+                "col_a\nvalue\n",
+                encoding="utf-8",
+            )
+
+    pairs = pd.DataFrame(
+        [
+            {
+                "pair_id": "m1__TO__m2",
+                "pair_kind": "positive",
+                "source_document_id": "doc",
+                "source_model_id": "m1",
+                "target_model_id": "m2",
+                "source_condition": "control",
+                "target_condition": "control",
+                "source_producer_id": "p1",
+                "target_producer_id": "p2",
+                "source_run": 1,
+                "target_run": 1,
+            }
+        ]
+    )
+
+    tasks = align_pipeline.build_alignment_tasks(
+        repo_root,
+        pairs,
+        projection_specs=projection_specs,
+        backend_methods=align_pipeline.semantic_backend_methods(),
+    )
+
+    assert len(tasks) == len(projection_specs) * 2
+    assert set(zip(tasks["backend"], tasks["method"], strict=True)) == {
+        ("valentine", "coma_py"),
+        ("bdikit", "coma"),
+    }
 
 
 def test_score_alignment_candidates_builds_pair_and_scenario_stats() -> None:

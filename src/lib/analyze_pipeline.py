@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import pandas as pd
 
+from src.lib import infer_pipeline
 from src.lib.infer_pipeline import read_text
 
 
@@ -28,7 +29,7 @@ def parse_run_name(name: str) -> int:
 
 
 def discover_infer_artifacts(repo_root: Path) -> pd.DataFrame:
-    infer_root = repo_root / "artifacts" / "infer"
+    infer_root = infer_pipeline.artifacts_root(repo_root) / "infer"
     records: list[dict[str, Any]] = []
 
     for final_cs_path in sorted(infer_root.rglob("final.cs")):

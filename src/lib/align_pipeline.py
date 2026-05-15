@@ -72,6 +72,24 @@ ALIGNMENT_CANDIDATE_COLUMNS = [
     "rank",
 ]
 
+DEFAULT_ALIGNMENT_PROJECTION_SPECS = [
+    ("property", "path_only"),
+    ("property", "path_plus_metadata_values"),
+    ("type", "members_as_values"),
+    ("relation", "path_plus_metadata_values"),
+]
+
+SEMANTIC_ALIGNMENT_PROJECTION_SPECS = [
+    ("property", "path_only"),
+    ("type", "members_as_values"),
+    ("relation", "path_plus_metadata_values"),
+]
+
+SEMANTIC_ALIGNMENT_BACKEND_METHODS = [
+    ("valentine", ["coma_py"]),
+    ("bdikit", ["coma"]),
+]
+
 
 def available_cpu_count() -> int:
     if hasattr(os, "sched_getaffinity"):
@@ -81,7 +99,7 @@ def available_cpu_count() -> int:
 
 
 def prepare_paths(repo_root: Path) -> AlignPreparePaths:
-    root_dir = repo_root / "artifacts" / "project"
+    root_dir = infer_pipeline.artifacts_root(repo_root) / "project"
     extracted_dir = root_dir / "extracted"
     projections_dir = root_dir / "projections"
     return AlignPreparePaths(
@@ -99,7 +117,7 @@ def project_paths(repo_root: Path) -> AlignPreparePaths:
 
 
 def align_run_paths(repo_root: Path) -> AlignRunPaths:
-    root_dir = repo_root / "artifacts" / "align"
+    root_dir = infer_pipeline.artifacts_root(repo_root) / "align"
     return AlignRunPaths(
         root_dir=root_dir,
         pairs_csv=root_dir / "pairs.csv",
@@ -108,7 +126,7 @@ def align_run_paths(repo_root: Path) -> AlignRunPaths:
 
 
 def score_paths(repo_root: Path) -> ScorePaths:
-    root_dir = repo_root / "artifacts" / "score"
+    root_dir = infer_pipeline.artifacts_root(repo_root) / "score"
     return ScorePaths(
         root_dir=root_dir,
         pair_scores_csv=root_dir / "pair-scores.csv",
@@ -615,7 +633,10 @@ def prepare_project_artifacts(
 
 def load_projection_csv(repo_root: Path, layer: str, mode: str, model_id: str) -> pd.DataFrame:
     paths = prepare_paths(repo_root)
-    return pd.read_csv(paths.projections_dir / layer / mode / f"{model_id}.csv")
+    try:
+        return pd.read_csv(paths.projections_dir / layer / mode / f"{model_id}.csv")
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
 
 
 def load_column_map(repo_root: Path, layer: str, model_id: str) -> dict[str, str]:
@@ -634,13 +655,25 @@ def load_project_artifacts(repo_root: Path) -> tuple[pd.DataFrame, pd.DataFrame]
     return model_index, elements
 
 
-def build_positive_pairs(model_index: pd.DataFrame) -> pd.DataFrame:
+def build_positive_pairs(
+    model_index: pd.DataFrame,
+    *,
+    same_condition_only: bool = False,
+    same_run_index_only: bool = False,
+) -> pd.DataFrame:
     pair_rows: list[dict[str, Any]] = []
 
     for source_document_id, group in model_index.groupby("source_document_id"):
         records = cast(list[dict[str, Any]], group.to_dict(orient="records"))
         for source_row, target_row in itertools.permutations(records, 2):
             if source_row["model_id"] == target_row["model_id"]:
+                continue
+            if (
+                same_condition_only
+                and source_row["condition"] != target_row["condition"]
+            ):
+                continue
+            if same_run_index_only and int(source_row["run"]) != int(target_row["run"]):
                 continue
 
             # Exclude same-scenario replicas of the same producer across multiple runs.
@@ -701,7 +734,7 @@ def append_alignment_candidates(
     paths.root_dir.mkdir(parents=True, exist_ok=True)
     frame = pd.DataFrame(rows).reindex(columns=ALIGNMENT_CANDIDATE_COLUMNS)
     if frame.empty:
-        if not paths.candidates_csv.exists():
+        if not append or not paths.candidates_csv.exists():
             frame.to_csv(paths.candidates_csv, index=False)
         return paths.candidates_csv
 
@@ -922,6 +955,29 @@ def magneto_method_names() -> list[str]:
     return ["native_zero_download"]
 
 
+def default_projection_specs() -> list[tuple[str, str]]:
+    return list(DEFAULT_ALIGNMENT_PROJECTION_SPECS)
+
+
+def semantic_projection_specs() -> list[tuple[str, str]]:
+    return list(SEMANTIC_ALIGNMENT_PROJECTION_SPECS)
+
+
+def default_backend_methods() -> list[tuple[str, list[str]]]:
+    return [
+        ("valentine", valentine_method_names()),
+        ("bdikit", bdikit_method_names()),
+        ("magneto", magneto_method_names()),
+    ]
+
+
+def semantic_backend_methods() -> list[tuple[str, list[str]]]:
+    return [
+        (backend, list(methods))
+        for backend, methods in SEMANTIC_ALIGNMENT_BACKEND_METHODS
+    ]
+
+
 def run_valentine_pair(
     repo_root: Path,
     pair_row: dict[str, Any],
@@ -1034,15 +1090,11 @@ def build_alignment_tasks(
     pairs: pd.DataFrame,
     *,
     projection_specs: list[tuple[str, str]],
+    backend_methods: list[tuple[str, list[str]]] | None = None,
 ) -> pd.DataFrame:
     pair_records = cast(list[dict[str, Any]], pairs.to_dict(orient="records"))
     task_rows: list[dict[str, Any]] = []
-
-    backend_methods: list[tuple[str, list[str]]] = [
-        ("valentine", valentine_method_names()),
-        ("bdikit", bdikit_method_names()),
-        ("magneto", magneto_method_names()),
-    ]
+    selected_backend_methods = backend_methods or default_backend_methods()
 
     for pair_index, pair_row in enumerate(pair_records, start=1):
         source_model_id = cast(str, pair_row["source_model_id"])
@@ -1053,7 +1105,7 @@ def build_alignment_tasks(
             if not projection_exists(repo_root, layer, mode, target_model_id):
                 continue
 
-            for backend, methods in backend_methods:
+            for backend, methods in selected_backend_methods:
                 for method in methods:
                     task_rows.append(
                         {
@@ -1228,6 +1280,7 @@ def run_alignment_pairs_parallel(
     pairs: pd.DataFrame,
     *,
     projection_specs: list[tuple[str, str]],
+    backend_methods: list[tuple[str, list[str]]] | None = None,
     timeout_seconds: int | None,
     max_workers: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -1236,6 +1289,7 @@ def run_alignment_pairs_parallel(
         repo_root,
         pairs,
         projection_specs=projection_specs,
+        backend_methods=backend_methods,
     )
     for result in iter_alignment_task_results_parallel(
         repo_root,

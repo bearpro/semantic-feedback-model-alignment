@@ -1,0 +1,23 @@
+infer:
+  provider: openrouter
+  runs: 1
+  temperature: 0.1
+  max_tokens: 12000
+
+smoke:
+  artifact_root: artifacts/smoke-e2e
+  clean: true
+  documents:
+    - data/soruce/documents/02_json_data_formats/RFC_7386_json_merge_patch.txt
+  models:
+    - google/gemini-2.5-flash-lite
+    - google/gemini-2.5-flash
+  scenarios:
+    - control
+    - guided
+    - feedback
+  align:
+    max_workers: 4
+    timeout_seconds: 240
+    same_condition_only: true
+    same_run_index_only: true
